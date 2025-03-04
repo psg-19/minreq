@@ -1,6 +1,6 @@
 use crate::{connection::HttpStream, Error};
 use std::collections::HashMap;
-use std::io::{self, BufReader, Bytes, Read};
+use tokio::io::{self, AsyncRead, BufReader};
 use std::str;
 
 const BACKING_READ_BUFFER_LENGTH: usize = 16 * 1024;
@@ -274,32 +274,17 @@ impl Iterator for ResponseLazy {
     }
 }
 
-impl Read for ResponseLazy {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut index = 0;
-        for res in self {
-            // there is no use for the estimated length in the read implementation
-            // so it is ignored.
-            let (byte, _) = res.map_err(|e| match e {
-                Error::IoError(e) => e,
-                _ => io::Error::new(io::ErrorKind::Other, e),
-            })?;
-
-            buf[index] = byte;
-            index += 1;
-
-            // if the buffer is full, it should stop reading
-            if index >= buf.len() {
-                break;
-            }
-        }
-
-        // index of the next byte is the number of bytes thats have been read
-        Ok(index)
+impl AsyncRead for ResponseLazy {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        todo!()
     }
 }
 
-fn read_until_closed(bytes: &mut HttpStreamBytes) -> Option<<ResponseLazy as Iterator>::Item> {
+fn read_until_closed(mut bytes: &mut HttpStreamBytes) -> Option<<ResponseLazy as Iterator>::Item> {
     if let Some(byte) = bytes.next() {
         match byte {
             Ok(byte) => Some(Ok((byte, 1))),
@@ -311,7 +296,7 @@ fn read_until_closed(bytes: &mut HttpStreamBytes) -> Option<<ResponseLazy as Ite
 }
 
 fn read_with_content_length(
-    bytes: &mut HttpStreamBytes,
+    mut bytes: &mut HttpStreamBytes,
     content_length: &mut usize,
 ) -> Option<<ResponseLazy as Iterator>::Item> {
     if *content_length > 0 {
@@ -348,7 +333,7 @@ fn read_trailers(
 }
 
 fn read_chunked(
-    bytes: &mut HttpStreamBytes,
+    mut bytes: &mut HttpStreamBytes,
     headers: &mut HashMap<String, String>,
     expecting_more_chunks: &mut bool,
     chunk_length: &mut usize,

@@ -263,7 +263,7 @@ impl Request {
     /// [`minreq::Error`](enum.Error.html) except
     /// [`SerdeJsonError`](enum.Error.html#variant.SerdeJsonError) and
     /// [`InvalidUtf8InBody`](enum.Error.html#variant.InvalidUtf8InBody).
-    pub fn send(self) -> Result<Response, Error> {
+    pub async fn send(self) -> Result<Response, Error> {
         let parsed_request = ParsedRequest::new(self)?;
         if parsed_request.url.https {
             #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
@@ -278,7 +278,7 @@ impl Request {
             }
         } else {
             let is_head = parsed_request.config.method == Method::Head;
-            let response = Connection::new(parsed_request).send()?;
+            let response = Connection::new(parsed_request).send().await?;
             Response::create(response, is_head)
         }
     }
@@ -288,7 +288,7 @@ impl Request {
     /// # Errors
     ///
     /// See [`send`](struct.Request.html#method.send).
-    pub fn send_lazy(self) -> Result<ResponseLazy, Error> {
+    pub async fn send_lazy(self) -> Result<ResponseLazy, Error> {
         let parsed_request = ParsedRequest::new(self)?;
         if parsed_request.url.https {
             #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
@@ -300,7 +300,7 @@ impl Request {
                 Err(Error::HttpsFeatureNotEnabled)
             }
         } else {
-            Connection::new(parsed_request).send()
+            Connection::new(parsed_request).send().await
         }
     }
 }
