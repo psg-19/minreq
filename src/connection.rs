@@ -11,12 +11,13 @@ use rustls::{self, ClientConfig, ClientConnection, RootCertStore, ServerName, St
 use std::convert::TryFrom;
 use std::env;
 use std::net::ToSocketAddrs;
+use std::pin::Pin;
 use tokio::io::{self, AsyncRead};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 #[cfg(feature = "rustls")]
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 #[cfg(feature = "rustls-webpki")]
 use webpki_roots::TLS_SERVER_ROOTS;
 
@@ -102,7 +103,13 @@ impl AsyncRead for HttpStream {
         cx: &mut std::task::Context<'_>,
         buf: &mut io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
+        match self.get_mut() {
+            HttpStream::Unsecured(ref mut stream, _) => {
+                // Delegate the read operation to the TcpStream
+                Pin::new(stream).poll_read(cx, buf)
+            },
+            _ => todo!()
+        }
     }
 }
 
@@ -275,7 +282,7 @@ impl Connection {
             stream,
             self.request.config.max_headers_size,
             self.request.config.max_status_line_len,
-        )?;
+        ).await?;
         handle_redirects(self, response).await
     }
 

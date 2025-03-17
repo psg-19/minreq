@@ -279,7 +279,7 @@ impl Request {
         } else {
             let is_head = parsed_request.config.method == Method::Head;
             let response = Connection::new(parsed_request).send().await?;
-            Response::create(response, is_head)
+            Response::create(response, is_head).await
         }
     }
 

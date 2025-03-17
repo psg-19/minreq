@@ -36,10 +36,16 @@ log = { version = "0.4.0" }
 openssl-probe = { version = "0.1", optional = true }
 native-tls = { version = "0.2", optional = true }
 tokio = { version = "1.44.0", features = ["net", "time", "io-util"] }
+tokio-util = { version = "0.7.14", features = ["io"] }
+tokio-stream = "0.1.17"
+futures-core = "0.3.31"
+bytes = "1.10.1"
+pin-project = "1.1.10"
 
 [dev-dependencies]
 tiny_http = "0.12"
 chrono = "0.4.0"
+tokio = { version = "1", features = ["full"] }
 
 [package.metadata.docs.rs]
 features = ["json-using-serde", "proxy", "https", "punycode"]
