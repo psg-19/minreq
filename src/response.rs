@@ -8,8 +8,7 @@ use pin_project::pin_project;
 use tokio::io::{self, AsyncRead, BufReader};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
-use std::str;
-use std::future::Future;
+use std::{str, usize};
 
 const BACKING_READ_BUFFER_LENGTH: usize = 16 * 1024;
 const MAX_CONTENT_LENGTH: usize = 16 * 1024;
@@ -231,6 +230,7 @@ pub struct ResponseLazy {
     stream: HttpStreamBytes,
     state: HttpStreamState,
     max_trailing_headers_size: Option<usize>,
+    trailing_content: Option<Trailing>,
 }
 
 type HttpStreamBytes = ReaderStream<BufReader<HttpStream>>;
@@ -247,8 +247,9 @@ impl ResponseLazy {
             reason_phrase,
             headers,
             state,
-            max_trailing_headers_size,
-        } = read_metadata(&mut stream, max_headers_size, max_status_line_len).await?;
+            max_trailing_headers_size, trailing_content } = read_metadata(&mut stream, max_headers_size, max_status_line_len).await?;
+        
+        let trailing_content = if trailing_content.len() == 0 {None} else {Some(trailing_content)};
 
         Ok(ResponseLazy {
             status_code,
@@ -258,6 +259,7 @@ impl ResponseLazy {
             stream,
             state,
             max_trailing_headers_size,
+            trailing_content,
         })
     }
 }
@@ -271,11 +273,22 @@ impl Stream for ResponseLazy {
         let this = self.project();
         let stream: Pin<&mut HttpStreamBytes> = this.stream;
 
+        let mut prefix = Trailing::new();
+        if let Some(trailing) = this.trailing_content {
+            prefix = trailing.clone();
+            *this.trailing_content = None;
+        }
+
+
         match this.state {
-            EndOnClose => read_until_closed(stream, cx),
-            ContentLength(ref mut length) => read_with_content_length(stream, length, cx),
+            EndOnClose => read_until_closed(prefix, stream, cx),
+            ContentLength(ref mut length) => {
+                let dbg = read_with_content_length(prefix, stream, length, cx);
+                dbg
+            },
             Chunked(ref mut expecting_chunks, ref mut length, ref mut content_length) => {
                 read_chunked(
+                    prefix,
                     stream,
                     this.headers,
                     expecting_chunks,
@@ -299,6 +312,12 @@ impl AsyncRead for ResponseLazy {
         let this = self.project();
         let stream: Pin<&mut HttpStreamBytes> = this.stream;
 
+
+        if let Some(prefix) = this.trailing_content {
+            buf.put_slice(&prefix);
+            *this.trailing_content = None;
+        }
+
         match stream.poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 let len = std::cmp::min(buf.remaining(), bytes.len());
@@ -312,7 +331,14 @@ impl AsyncRead for ResponseLazy {
     }
 }
 
-fn read_until_closed(bytes: Pin<&mut HttpStreamBytes>, cx: &mut Context<'_>) -> Poll<Option<<ResponseLazy as Stream>::Item>> {
+fn process_prefix(prefix: &[u8]) -> Poll<Option<<ResponseLazy as Stream>::Item>> {
+    Poll::Ready(Some(Ok((Bytes::copy_from_slice(prefix), prefix.len()))))
+}
+
+fn read_until_closed(prefix: Trailing, bytes: Pin<&mut HttpStreamBytes>, cx: &mut Context<'_>) -> Poll<Option<<ResponseLazy as Stream>::Item>> {
+    if prefix.len() > 0 {
+        return process_prefix(&prefix);
+    }
     match bytes.poll_next(cx) {
         Poll::Ready(some_chunk) => match some_chunk {
             Some(Ok(chunk)) => {
@@ -327,10 +353,16 @@ fn read_until_closed(bytes: Pin<&mut HttpStreamBytes>, cx: &mut Context<'_>) -> 
 }
 
 fn read_with_content_length(
+    prefix: Trailing,
     bytes: Pin<&mut HttpStreamBytes>,
     content_length: &mut usize,
     cx: &mut Context<'_>
 ) -> Poll<Option<<ResponseLazy as Stream>::Item>> {    
+    let prefix_len = prefix.len();
+    if prefix_len > 0 {
+        *content_length -= prefix_len;
+        return process_prefix(&prefix);
+    }
     if *content_length > 0 {
         match bytes.poll_next(cx) {
             Poll::Ready(some_chunk) => match some_chunk {
@@ -340,9 +372,11 @@ fn read_with_content_length(
                     Poll::Ready(Some(Ok((chunk, (*content_length).min(MAX_CONTENT_LENGTH) + len))))
                 }
                 Some(Err(err)) => Poll::Ready(Some(Err(Error::IoError(err)))),
-                None => todo!(),
+                None => Poll::Ready(None),
             },
-            Poll::Pending => todo!(),
+            Poll::Pending => {
+                Poll::Pending
+            }
         }
     } else {
         Poll::Ready(None)
@@ -353,12 +387,15 @@ fn read_trailers(
     mut bytes: Pin<&mut HttpStreamBytes>,
     headers: &mut HashMap<String, String>,
     mut max_headers_size: Option<usize>,
-    cx: &mut Context<'_>
+    cx: &mut Context<'_>,
+    prefix: Trailing,
 ) -> Poll<Result<(), Error>> {
+    let mut trailing = prefix;
     loop {
-        let trailer_line = read_line(bytes.as_mut(), max_headers_size, Error::HeadersOverflow, cx)?;
+        let trailer_line = read_line(bytes.as_mut(), max_headers_size, Error::HeadersOverflow, cx, trailing)?;
         match trailer_line {
-            Poll::Ready(trailer_line) => {
+            Poll::Ready((trailer_line, trailing_)) => {
+                trailing = trailing_;
                 if let Some(ref mut max_headers_size) = max_headers_size {
                     *max_headers_size -= trailer_line.len() + 2;
                 }
@@ -375,6 +412,7 @@ fn read_trailers(
 }
 
 fn read_chunked(
+    prefix: Trailing,
     mut bytes: Pin<&mut HttpStreamBytes>,
     headers: &mut HashMap<String, String>,
     expecting_more_chunks: &mut bool,
@@ -393,7 +431,7 @@ fn read_chunked(
         // extensions (which are ignored).
 
         // Get the size of the next chunk
-        let length_line = match read_line(bytes.as_mut(), Some(1024), Error::MalformedChunkLength, cx) {
+        let (length_line, trailing) = match read_line(bytes.as_mut(), Some(1024), Error::MalformedChunkLength, cx, prefix) {
             Poll::Ready(Ok(line)) => line,
             Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
             Poll::Pending => return Poll::Pending,
@@ -417,7 +455,7 @@ fn read_chunked(
         };
 
         if incoming_length == 0 {
-            match read_trailers(bytes.as_mut(), headers, max_trailing_headers_size, cx) {
+            match read_trailers(bytes.as_mut(), headers, max_trailing_headers_size, cx, trailing) {
                 Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
                 Poll::Pending => return Poll::Pending,
                 _ => {}
@@ -476,37 +514,74 @@ struct ResponseMetadata {
     headers: HashMap<String, String>,
     state: HttpStreamState,
     max_trailing_headers_size: Option<usize>,
+    trailing_content: Trailing,
 }
+
+type Trailing = Vec<u8>;
 
 async fn read_line_async(
     stream: &mut HttpStreamBytes,
     max_len: Option<usize>,
     overflow_error: Error,
-) -> Result<String, Error> {
+    prefix: Trailing,
+) -> Result<(String, Trailing), Error> {
     let mut bytes = Vec::with_capacity(32);
-    while let Some(byte) = stream.next().await {
-        match byte {
-            Ok(chunk) => {
-                if let Some(max_len) = max_len {
-                    if bytes.len() >= max_len {
-                        return Err(overflow_error);
-                    }
-                }
-                for byte in chunk {
-                    if byte == b'\n' {
-                        if let Some(b'\r') = bytes.last() {
-                            bytes.pop();
-                        }
-                        break;
-                    } else {
-                        bytes.push(byte);
-                    }
-                }
+    let mut new_line_flag = true;
+    let mut trailing = Trailing::new();
+    let max_len = max_len.unwrap_or(usize::MAX);
+
+    for byte in prefix {
+        if new_line_flag {
+            if bytes.len() >= max_len {
+                return Err(overflow_error);
             }
-            Err(err) => return Err(Error::IoError(err)),
+            if byte == b'\n' {
+                if let Some(b'\r') = bytes.last() {
+                    bytes.pop();
+                }
+                new_line_flag = false;
+            } else {
+                bytes.push(byte);
+            }
+        } else {
+            trailing.push(byte);
         }
     }
-    String::from_utf8(bytes).map_err(|_error| Error::InvalidUtf8InResponse)
+
+    if new_line_flag {
+        while let Some(some_chunk) = stream.next().await {
+            match some_chunk {
+                Ok(chunk) => {
+                    for byte in chunk {
+                        if new_line_flag {
+                            if bytes.len() >= max_len {
+                                return Err(overflow_error);
+                            }
+                            if byte == b'\n' {
+                                if let Some(b'\r') = bytes.last() {
+                                    bytes.pop();
+                                }
+                                new_line_flag = false;
+                            } else {
+                                bytes.push(byte);
+                            }
+                        } else {
+                            trailing.push(byte);
+                        }
+                    }
+                    if !new_line_flag {
+                        break;
+                    }
+                }
+                Err(err) => return Err(Error::IoError(err)),
+            }
+        }
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(line) => Ok((line, trailing)),
+        Err(_) => Err(Error::InvalidUtf8InResponse),
+    }
 }
 
 async fn read_metadata(
@@ -514,12 +589,15 @@ async fn read_metadata(
     mut max_headers_size: Option<usize>,
     max_status_line_len: Option<usize>,
 ) -> Result<ResponseMetadata, Error> {
-    let line = read_line_async(stream, max_status_line_len, Error::StatusLineOverflow).await?;
+    let mut trailing = Trailing::new();
+    let (line, trailing_) = read_line_async(stream, max_status_line_len, Error::StatusLineOverflow, trailing).await?;
+    trailing = trailing_;
     let (status_code, reason_phrase) = parse_status_line(&line);
 
     let mut headers = HashMap::new();
     loop {
-        let line = read_line_async(stream, max_headers_size, Error::HeadersOverflow).await?;
+        let (line, trailing_) = read_line_async(stream, max_headers_size, Error::HeadersOverflow, trailing).await?;
+        trailing = trailing_;
         if line.is_empty() {
             // Body starts here
             break;
@@ -531,7 +609,6 @@ async fn read_metadata(
             headers.insert(header.0, header.1);
         }
     }
-
     let mut chunked = false;
     let mut content_length = None;
     for (header, value) in &headers {
@@ -565,6 +642,7 @@ async fn read_metadata(
         headers,
         state,
         max_trailing_headers_size: max_headers_size,
+        trailing_content: trailing,
     })
 }
 
@@ -572,38 +650,71 @@ fn read_line(
     mut stream: Pin<&mut HttpStreamBytes>,
     max_len: Option<usize>,
     overflow_error: Error,
-    cx: &mut Context<'_>
-) -> Poll<Result<String, Error>> {
+    cx: &mut Context<'_>,
+    prefix: Trailing,
+) -> Poll<Result<(String, Trailing), Error>> {
     let mut bytes = Vec::with_capacity(32);
-    loop {
-        match stream.as_mut().poll_next(cx) {
-            Poll::Ready(some_chunk) => {
-                match some_chunk {
-                    Some(Ok(chunk)) => {
-                        if let Some(max_len) = max_len {
-                            if bytes.len() >= max_len {
-                                return Poll::Ready(Err(overflow_error));
-                            }
-                        }
-                        for byte in chunk {
-                            if byte == b'\n' {
-                                if let Some(b'\r') = bytes.last() {
-                                    bytes.pop();
-                                }
-                                break;
-                            } else {
-                                bytes.push(byte);
-                            }
-                        }
-                    }
-                    Some(Err(err)) => return Poll::Ready(Err(Error::IoError(err))),
-                    None => break,
+    let mut new_line_flag = true;
+    let mut trailing = Trailing::new();
+
+    for byte in prefix {
+        if new_line_flag {
+            if byte == b'\n' {
+                if let Some(b'\r') = bytes.last() {
+                    bytes.pop();
                 }
-            },
-            Poll::Pending => return Poll::Pending
+                new_line_flag = false;
+            } else {
+                bytes.push(byte);
+            }
+        } else {
+            trailing.push(byte);
         }
     }
-    Poll::Ready(String::from_utf8(bytes).map_err(|_error| Error::InvalidUtf8InResponse))
+
+    if new_line_flag {
+        loop {
+            match stream.as_mut().poll_next(cx) {
+                Poll::Ready(some_chunk) => {
+                    match some_chunk {
+                        Some(Ok(chunk)) => {
+                            if let Some(max_len) = max_len {
+                                if bytes.len() >= max_len {
+                                    return Poll::Ready(Err(overflow_error));
+                                }
+                            }
+
+                            for byte in chunk {
+                                if new_line_flag {
+                                    if byte == b'\n' {
+                                        if let Some(b'\r') = bytes.last() {
+                                            bytes.pop();
+                                        }
+                                        new_line_flag = false;
+                                    } else {
+                                        bytes.push(byte);
+                                    }
+                                } else {
+                                    trailing.push(byte);
+                                }
+                            }
+                            if !new_line_flag {
+                                break;
+                            }
+                        }
+                        Some(Err(err)) => return Poll::Ready(Err(Error::IoError(err))),
+                        None => break,
+                    }
+                },
+                Poll::Pending => return Poll::Pending
+            }
+        }
+    }
+    let res = match String::from_utf8(bytes) {
+        Ok(line) => Ok((line, trailing)),
+        Err(_) => Err(Error::InvalidUtf8InResponse),
+    };
+    Poll::Ready(res)
 }
 
 fn parse_status_line(line: &str) -> (i32, String) {
