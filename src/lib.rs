@@ -110,8 +110,8 @@
 //! or something could go wrong during the download.
 //!
 //! ```
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let response = minreq::get("http://example.com").send()?;
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let response = minreq::get("http://example.com").send().await?;
 //! assert!(response.as_str()?.contains("</html>"));
 //! assert_eq!(200, response.status_code);
 //! assert_eq!("OK", response.reason_phrase);
@@ -127,11 +127,11 @@
 //! To include a body, add `with_body("<body contents>")` before
 //! `send()`.
 //!
-//! ```
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! ```rust
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let response = minreq::post("http://example.com")
 //!     .with_body("Foobar")
-//!     .send()?;
+//!     .send().await?;
 //! # Ok(()) }
 //! ```
 //!
@@ -140,11 +140,11 @@
 //! To add a header, add `with_header("Key", "Value")` before
 //! `send()`.
 //!
-//! ```
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! ```rust
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let response = minreq::get("http://example.com")
 //!     .with_header("Accept", "text/html")
-//!     .send()?;
+//!     .send().await?;
 //! # Ok(()) }
 //! ```
 //!
@@ -157,9 +157,9 @@
 //! because the names are case-insensitive according to the spec, and
 //! this unifies the casings for easier `get()`ing.
 //!
-//! ```
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let response = minreq::get("http://example.com").send()?;
+//! ```rust
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let response = minreq::get("http://example.com").send().await?;
 //! assert!(response.headers.get("content-type").unwrap().starts_with("text/html"));
 //! # Ok(()) }
 //! ```
@@ -172,10 +172,10 @@
 //! NOTE: There is no timeout by default.
 //!
 //! ```no_run
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let response = minreq::post("http://example.com")
 //!     .with_timeout(10)
-//!     .send()?;
+//!     .send().await?;
 //! # Ok(()) }
 //! ```
 //!
@@ -189,13 +189,13 @@
 //! supported at this time.
 //!
 //! ```no_run
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! #[cfg(feature = "proxy")]
 //! {
 //!     let proxy = minreq::Proxy::new("localhost:8080")?;
 //!     let response = minreq::post("http://example.com")
 //!         .with_proxy(proxy)
-//!         .send()?;
+//!         .send().await?;
 //!     println!("{}", response.as_str()?);
 //! }
 //! # Ok(()) }
