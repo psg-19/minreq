@@ -4,19 +4,19 @@ mod setup;
 use self::setup::*;
 use std::io;
 
-#[test]
+#[tokio::test]
 #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
-fn test_https() {
+async fn test_https() {
     // TODO: Implement this locally.
     assert_eq!(
-        get_status_code(minreq::get("https://example.com").send()),
+        get_status_code(minreq::get("https://example.com").send().await),
         200,
     );
 }
 
-#[test]
+#[tokio::test]
 #[cfg(feature = "json-using-serde")]
-fn test_json_using_serde() {
+async fn test_json_using_serde() {
     const JSON_SRC: &str = r#"{
         "str": "Json test",
         "num": 42
@@ -26,7 +26,7 @@ fn test_json_using_serde() {
     let response = minreq::post(url("/echo"))
         .with_json(&original_json)
         .unwrap()
-        .send()
+        .send().await
         .unwrap();
     let actual_json: serde_json::Value = response.json().unwrap();
     assert_eq!(&actual_json, &original_json);

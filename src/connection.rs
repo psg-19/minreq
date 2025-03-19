@@ -6,47 +6,38 @@ use crate::native_tls::{TlsConnector, TlsStream};
 use crate::request::ParsedRequest;
 use crate::{Error, Method, ResponseLazy};
 #[cfg(feature = "rustls")]
-use rustls::{self, ClientConfig, ClientConnection, RootCertStore, ServerName, StreamOwned};
-#[cfg(feature = "rustls")]
-use std::convert::TryFrom;
+use {
+    tokio_rustls::rustls::{ClientConfig, RootCertStore},
+    rustls_pki_types::ServerName,
+    std::convert::TryFrom,
+    std::sync::Arc,
+    tokio_rustls::TlsConnector,
+};
 use std::env;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use tokio::io::{self, AsyncRead};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Instant};
-#[cfg(feature = "rustls")]
-use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "rustls-webpki")]
+#[cfg(any(feature = "rustls-webpki", feature = "rustls"))]
 use webpki_roots::TLS_SERVER_ROOTS;
 
 #[cfg(feature = "rustls")]
 static CONFIG: std::sync::LazyLock<Arc<ClientConfig>> = std::sync::LazyLock::new(|| {
     let mut root_certificates = RootCertStore::empty();
+    root_certificates.extend(TLS_SERVER_ROOTS.iter().cloned());
 
     // Try to load native certs
     #[cfg(feature = "https-rustls-probe")]
-    if let Ok(os_roots) = rustls_native_certs::load_native_certs() {
-        for root_cert in os_roots {
-            // Ignore erroneous OS certificates, there's nothing
-            // to do differently in that situation anyways.
-            let _ = root_certificates.add(&rustls::Certificate(root_cert.0));
-        }
+    let rustls_native_certs::CertificateResult { certs, .. } = rustls_native_certs::load_native_certs();
+    for cert in certs {
+        // Ignore erroneous OS certificates, there's nothing
+        // to do differently in that situation anyways.
+        let _ = root_certificates.add(cert);
     }
 
-    #[cfg(feature = "rustls-webpki")]
-    #[allow(deprecated)] // Need to use add_server_trust_anchors to compile with rustls 0.21.1
-    root_certificates.add_server_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
-        rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-            ta.subject,
-            ta.spki,
-            ta.name_constraints,
-        )
-    }));
-
     let config = ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(root_certificates)
         .with_no_client_auth();
     Arc::new(config)
@@ -54,7 +45,7 @@ static CONFIG: std::sync::LazyLock<Arc<ClientConfig>> = std::sync::LazyLock::new
 
 type UnsecuredStream = TcpStream;
 #[cfg(feature = "rustls")]
-type SecuredStream = StreamOwned<ClientConnection, TcpStream>;
+type SecuredStream = TlsStream<TcpStream>;
 #[cfg(all(
     not(feature = "rustls"),
     any(feature = "openssl", feature = "native-tls")
@@ -151,39 +142,50 @@ impl Connection {
     /// Sends the [`Request`](struct.Request.html), consumes this
     /// connection, and returns a [`Response`](struct.Response.html).
     #[cfg(feature = "rustls")]
-    pub(crate) fn send_https(mut self) -> Result<ResponseLazy, Error> {
-        enforce_timeout(self.timeout_at, move || {
-            self.request.url.host = ensure_ascii_host(self.request.url.host)?;
-            let bytes = self.request.as_bytes();
+    pub(crate) async fn send_https(self) -> Result<ResponseLazy, Error> {
+        match self.timeout()? {
+            None => {
+                self.send_https_without_timeout().await
+            },
+            Some(duration) => {
+                match timeout(duration, self.send_https_without_timeout()).await {
+                    Ok(result) => result,
+                    Err(_) => Err(Error::IoError(timeout_err())),
+                }
+            }
+        }
+    }
 
-            // Rustls setup
-            log::trace!("Setting up TLS parameters for {}.", self.request.url.host);
-            let dns_name = match ServerName::try_from(&*self.request.url.host) {
-                Ok(result) => result,
-                Err(err) => return Err(Error::IoError(io::Error::new(io::ErrorKind::Other, err))),
-            };
-            let sess = ClientConnection::new(CONFIG.clone(), dns_name)
-                .map_err(Error::RustlsCreateConnection)?;
+    #[cfg(feature = "rustls")]
+    async fn send_https_without_timeout(mut self) -> Result<ResponseLazy, Error> {
+        self.request.url.host = ensure_ascii_host(self.request.url.host)?;
+        let bytes = self.request.as_bytes();
 
-            log::trace!("Establishing TCP connection to {}.", self.request.url.host);
-            let tcp = self.connect()?;
+        // Rustls setup
+        log::trace!("Setting up TLS parameters for {}.", self.request.url.host);
+        let dns_name = match ServerName::try_from(self.request.url.host.clone()) {
+            Ok(result) => result,
+            Err(err) => return Err(Error::IoError(io::Error::new(io::ErrorKind::Other, err))),
+        };
+        let connector = TlsConnector::from(CONFIG.clone());
 
-            // Send request
-            log::trace!("Establishing TLS session to {}.", self.request.url.host);
-            let mut tls = StreamOwned::new(sess, tcp); // I don't think this actually does any communication.
-            log::trace!("Writing HTTPS request to {}.", self.request.url.host);
-            let _ = tls.get_ref().set_write_timeout(self.timeout()?);
-            tls.write_all(&bytes)?;
+        log::trace!("Establishing TCP connection to {}.", self.request.url.host);
+        let tcp = self.connect().await?;
 
-            // Receive request
-            log::trace!("Reading HTTPS response from {}.", self.request.url.host);
-            let response = ResponseLazy::from_stream(
-                HttpStream::create_secured(tls, self.timeout_at),
-                self.request.config.max_headers_size,
-                self.request.config.max_status_line_len,
-            )?;
-            handle_redirects(self, response)
-        })
+        // Send request
+        log::trace!("Establishing TLS session to {}.", self.request.url.host);
+        let mut tls = connector.connect(dns_name, tcp).await?;
+        log::trace!("Writing HTTPS request to {}.", self.request.url.host);
+        tls.write_all(&bytes).await?;
+
+        // Receive request
+        log::trace!("Reading HTTPS response from {}.", self.request.url.host);
+        let response = ResponseLazy::from_stream(
+            HttpStream::create_secured(tls, self.timeout_at),
+            self.request.config.max_headers_size,
+            self.request.config.max_status_line_len,
+        ).await?;
+        handle_redirects(self, response).await
     }
 
     /// Sends the [`Request`](struct.Request.html), consumes this
@@ -361,7 +363,7 @@ async fn handle_redirects(
                 )))]
                 return Err(Error::HttpsFeatureNotEnabled);
                 #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
-                return connection.send_https();
+                return Box::pin(connection.send_https()).await;
             } else {
                 Box::pin(connection.send()).await
             }
@@ -435,44 +437,5 @@ fn ensure_ascii_host(host: String) -> Result<String, Error> {
             result.truncate(result.len() - 1); // Remove the trailing dot
             Ok(result)
         }
-    }
-}
-
-/// Enforce the timeout by running the function in a new thread and
-/// parking the current one with a timeout.
-///
-/// While minreq does use timeouts (somewhat) properly, some
-/// interfaces such as [ToSocketAddrs] don't allow for specifying the
-/// timeout. Hence this.
-fn enforce_timeout<F, R>(timeout_at: Option<Instant>, f: F) -> Result<R, Error>
-where
-    F: 'static + Send + FnOnce() -> Result<R, Error>,
-    R: 'static + Send,
-{
-    use std::sync::mpsc::{channel, RecvTimeoutError};
-
-    match timeout_at {
-        Some(deadline) => {
-            let (sender, receiver) = channel();
-            let thread = std::thread::spawn(move || {
-                let result = f();
-                let _ = sender.send(());
-                result
-            });
-            if let Some(timeout_duration) = deadline.checked_duration_since(Instant::now()) {
-                match receiver.recv_timeout(timeout_duration) {
-                    Ok(()) => thread.join().unwrap(),
-                    Err(err) => match err {
-                        RecvTimeoutError::Timeout => Err(Error::IoError(timeout_err())),
-                        RecvTimeoutError::Disconnected => {
-                            Err(Error::Other("request connection paniced"))
-                        }
-                    },
-                }
-            } else {
-                Err(Error::IoError(timeout_err()))
-            }
-        }
-        None => f(),
     }
 }

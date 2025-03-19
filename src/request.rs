@@ -269,8 +269,8 @@ impl Request {
             #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
             {
                 let is_head = parsed_request.config.method == Method::Head;
-                let response = Connection::new(parsed_request).send_https()?;
-                Response::create(response, is_head)
+                let response = Connection::new(parsed_request).send_https().await?;
+                Response::create(response, is_head).await
             }
             #[cfg(not(any(feature = "rustls", feature = "openssl", feature = "native-tls")))]
             {
@@ -293,7 +293,7 @@ impl Request {
         if parsed_request.url.https {
             #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
             {
-                Connection::new(parsed_request).send_https()
+                Connection::new(parsed_request).send_https().await
             }
             #[cfg(not(any(feature = "rustls", feature = "openssl", feature = "native-tls")))]
             {

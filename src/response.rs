@@ -20,8 +20,8 @@ const MAX_CONTENT_LENGTH: usize = 16 * 1024;
 /// # Example
 ///
 /// ```no_run
-/// # fn main() -> Result<(), minreq::Error> {
-/// let response = minreq::get("http://example.com").send()?;
+/// # async fn run() -> Result<(), minreq::Error> {
+/// let response = minreq::get("http://example.com").send().await?;
 /// println!("{}", response.as_str()?);
 /// # Ok(()) }
 /// ```
@@ -83,9 +83,9 @@ impl Response {
     /// # Example
     ///
     /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// # let url = "http://example.org/";
-    /// let response = minreq::get(url).send()?;
+    /// let response = minreq::get(url).send().await?;
     /// println!("{}", response.as_str()?);
     /// # Ok(())
     /// # }
@@ -104,9 +104,9 @@ impl Response {
     /// # Example
     ///
     /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// # let url = "http://example.org/";
-    /// let response = minreq::get(url).send()?;
+    /// let response = minreq::get(url).send().await?;
     /// println!("{:?}", response.as_bytes());
     /// # Ok(())
     /// # }
@@ -122,9 +122,9 @@ impl Response {
     /// # Example
     ///
     /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// # let url = "http://example.org/";
-    /// let response = minreq::get(url).send()?;
+    /// let response = minreq::get(url).send().await?;
     /// println!("{:?}", response.into_bytes());
     /// // This would error, as into_bytes consumes the Response:
     /// // let x = response.status_code;
@@ -199,13 +199,14 @@ impl Response {
 /// ```no_run
 /// // This is how the normal Response works behind the scenes, and
 /// // how you might use ResponseLazy.
-/// # fn main() -> Result<(), minreq::Error> {
-/// let response = minreq::get("http://example.com").send_lazy()?;
+/// # async fn run() -> Result<(), minreq::Error> {
+/// let mut response = minreq::get("http://example.com").send_lazy().await?;
 /// let mut vec = Vec::new();
-/// for result in response {
-///     let (byte, length) = result?;
+/// use tokio_stream::StreamExt;
+/// while let Some(result) = response.next().await {
+///     let (chunk, length) = result?;
 ///     vec.reserve(length);
-///     vec.push(byte);
+///     vec.extend(chunk);
 /// }
 /// # Ok(())
 /// # }
