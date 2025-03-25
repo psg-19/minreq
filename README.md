@@ -1,10 +1,10 @@
-# minreq
+# async-minreq
 [![Crates.io](https://img.shields.io/crates/d/minreq.svg)](https://crates.io/crates/minreq)
-[![Documentation](https://docs.rs/minreq/badge.svg)](https://docs.rs/minreq)
+<!-- [![Documentation](https://docs.rs/minreq/badge.svg)](https://docs.rs/minreq) -->
 ![Unit tests](https://github.com/neonmoe/minreq/actions/workflows/unit-tests.yml/badge.svg)
 ![MSRV](https://github.com/neonmoe/minreq/actions/workflows/msrv.yml/badge.svg)
 
-Simple, minimal-dependency HTTP client. Optional features for json
+Simple, async minimal-dependency HTTP client. Optional features for json
 responses (`json-using-serde`), unicode domains (`punycode`), http
 proxies (`proxy`), and https with various TLS implementations
 (`https-rustls`, `https-rustls-probe`, `https-bundled`,
