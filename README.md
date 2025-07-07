@@ -53,7 +53,7 @@ entirely, including the commands instructed.
 We use an MSRV per major release, i.e., with a new major release we
 reserve the right to change the MSRV.
 
-The current major version (v2) of this library should always compile with any
+The current major version of this library should always compile with any
 combination of features excluding the TLS and urlencoding features on **Rust
 1.48**. This is because those dependencies themselves have a higher MSRV.
 
