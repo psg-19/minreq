@@ -27,16 +27,42 @@ use {
     tokio_rustls::client::TlsStream,
     tokio_rustls::rustls::{ClientConfig, RootCertStore},
     tokio_rustls::TlsConnector,
+    std::sync::OnceLock,
+    rustls_pki_types::CertificateDer as Certificate,
 };
+
+#[cfg(feature = "rustls")]
+static MANUAL_ROOTS: OnceLock<Vec<Certificate<'static>>> = OnceLock::new();
+
+#[cfg(feature = "rustls")]
+pub fn set_manual_roots(certs: Vec<Certificate<'static>>) {
+
+    let _ = MANUAL_ROOTS.set(certs);
+
+}
 
 #[cfg(feature = "rustls")]
 static CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
     let mut root_certificates = RootCertStore::empty();
-    root_certificates.extend(TLS_SERVER_ROOTS.iter().cloned());
 
-    // Try to load native certs
-    #[cfg(feature = "https-rustls-probe")]
-    {
+    #[cfg(feature = "https-rustls-tls-manual-roots")]{
+    if let Some(certs) = MANUAL_ROOTS.get() {
+        for cert in certs {
+            root_certificates
+                .add(cert.clone())
+                .expect("invalid manual root certificate");
+        }
+    }
+    else {
+            panic!("https-rustls-tls-manual-roots is enabled, but no manual roots were set using set_manual_roots()");
+        }
+}
+
+// Try to load native certs
+#[cfg(not(feature = "https-rustls-tls-manual-roots"))]
+{
+          root_certificates.extend(TLS_SERVER_ROOTS.iter().cloned());
+          #[cfg(feature = "https-rustls-probe")]{
         let rustls_native_certs::CertificateResult { certs, .. } =
             rustls_native_certs::load_native_certs();
         for cert in certs {
@@ -44,6 +70,7 @@ static CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
             // to do differently in that situation anyways.
             let _ = root_certificates.add(cert);
         }
+    }
     }
     let config = ClientConfig::builder()
         .with_root_certificates(root_certificates)
